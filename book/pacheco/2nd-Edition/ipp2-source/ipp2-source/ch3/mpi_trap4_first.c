@@ -92,7 +92,7 @@ int main(int argc, char *argv[]) {
 
    if (my_rank == 0) {
       printf("With n = %d trapezoids, our estimate\n", n);
-      printf("of the integral from %f to %f = %.15e\n",
+      printf("of the integral from %f to %f = %.17f\n",
          a, b, total_int);
    }
 
