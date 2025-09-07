@@ -26,6 +26,8 @@
  * IPP2:  Section 3.5 (pp. 125 and ff.)
  */
 #include <stdio.h>
+
+// used for atof
 #include <stdlib.h> 
 
 /* We'll be using MPI routines, definitions, etc. */
@@ -36,8 +38,8 @@ void Build_mpi_type(double* a_p, double* b_p, int* n_p,
       MPI_Datatype* input_mpi_t_p);
 
 /* Get the input values */
-void Get_input(int my_rank, int comm_sz, double* a_p, double* b_p,
-      int* n_p,int argc, char *argv[]);
+// void Get_input(int my_rank, int comm_sz, double* a_p, double* b_p,
+//       int* n_p);
 
 /* Calculate local integral  */
 double Trap(double left_endpt, double right_endpt, int trap_count, 
@@ -49,8 +51,7 @@ double f(double x);
 int main(int argc, char *argv[]) {
    int my_rank, comm_sz, n, local_n;   
    double a, b, h, local_a, local_b;
-   double local_int, total_int = 0.0;
-   int source;
+   double local_int, total_int;
 
    /* Let the system do what it needs to start up MPI */
    MPI_Init(NULL, NULL);
@@ -61,8 +62,12 @@ int main(int argc, char *argv[]) {
    /* Find out how many processes are being used */
    MPI_Comm_size(MPI_COMM_WORLD, &comm_sz);
 
-   Get_input(my_rank, comm_sz, &a, &b, &n, argc, argv);
-
+   // Get_input(my_rank, comm_sz, &a, &b, &n);
+   
+   //instead assign commandline values to a,b,n
+   a = atof(argv[1]);
+   b = atof(argv[2]);
+   n = atoi(argv[3]);
 
    h = (b-a)/n;          /* h is the same for all processes */
    local_n = n/comm_sz;  /* So is the number of trapezoids  */
@@ -74,34 +79,25 @@ int main(int argc, char *argv[]) {
    local_b = local_a + local_n*h;
    local_int = Trap(local_a, local_b, local_n, h);
 
-   /* Add up the integrals calculated by each process */
-   // MPI_Reduce(&local_int, &total_int, 1, MPI_DOUBLE, MPI_SUM, 0,
-   //       MPI_COMM_WORLD);
+   // /* Add up the integrals calculated by each process */
+   MPI_Reduce(&local_int, &total_int, 1, MPI_DOUBLE, MPI_SUM, 0,
+         MPI_COMM_WORLD);
 
    /* Print the result */
-   if (my_rank != 0) {
-      MPI_Send(&local_int, 1, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD);
-   } else {
-      total_int = local_int;  // Start with process 0's own integral
-      for (source = 1; source < comm_sz; source++) {
-         double received_int;
-         MPI_Recv(&received_int, 1, MPI_DOUBLE, source, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-         total_int += received_int;
-      }
-   }
-
    if (my_rank == 0) {
       printf("With n = %d trapezoids, our estimate\n", n);
-      printf("of the integral from %f to %f = %.17f\n",
-         a, b, total_int);
+      printf("of the integral from %f to %f = %.15e\n",
+          a, b, total_int);
+   }
+   else{
+      printf("Process %d > a = %f, b = %f, n = %d\n", my_rank, a, b, n);
    }
 
    /* Shut down MPI */
    MPI_Finalize();
 
    return 0;
-}
- /*  main  */
+} /*  main  */
 
 /*------------------------------------------------------------------
  * Function:     Build_mpi_type
@@ -144,24 +140,26 @@ void Build_mpi_type(
  *               b_p:  pointer to right endpoint               
  *               n_p:  pointer to number of trapezoids
  */
-void Get_input(
-      int      my_rank  /* in  */, 
-      int      comm_sz  /* in  */, 
-      double*  a_p      /* out */, 
-      double*  b_p      /* out */,
-      int*     n_p      /* out */,
-      int argc, 
-      char *argv[]) {
-   if (argc < 4) {
-      if (my_rank == 0) {
-         fprintf(stderr, "Usage: %s <a> <b> <n>\n", argv[0]);
-      }
-      MPI_Abort(MPI_COMM_WORLD, 1);
-   }
-   *a_p = atof(argv[1]);
-   *b_p = atof(argv[2]);
-   *n_p = atoi(argv[3]);
-}
+
+//remove Get_input function
+// void Get_input(
+//       int      my_rank  /* in  */, 
+//       int      comm_sz  /* in  */, 
+//       double*  a_p      /* out */, 
+//       double*  b_p      /* out */,
+//       int*     n_p      /* out */) {
+//    MPI_Datatype input_mpi_t;
+
+//    Build_mpi_type(a_p, b_p, n_p, &input_mpi_t);
+
+//    if (my_rank == 0) {
+//       printf("Enter a, b, and n\n");
+//       scanf("%lf %lf %d", a_p, b_p, n_p);
+//    } 
+//    MPI_Bcast(a_p, 1, input_mpi_t, 0, MPI_COMM_WORLD);
+
+//    MPI_Type_free(&input_mpi_t);
+// }  /* Get_input */
 
 /*------------------------------------------------------------------
  * Function:     Trap
