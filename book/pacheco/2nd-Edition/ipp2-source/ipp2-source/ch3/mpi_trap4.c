@@ -26,6 +26,8 @@
  * IPP2:  Section 3.5 (pp. 125 and ff.)
  */
 #include <stdio.h>
+
+//added library to acces atoi and atof functions
 #include <stdlib.h> 
 
 /* We'll be using MPI routines, definitions, etc. */
@@ -36,6 +38,7 @@ void Build_mpi_type(double* a_p, double* b_p, int* n_p,
       MPI_Datatype* input_mpi_t_p);
 
 /* Get the input values */
+//added argv and argc variables to function parameters
 void Get_input(int my_rank, int comm_sz, double* a_p, double* b_p,
       int* n_p,int argc, char *argv[]);
 
@@ -46,7 +49,7 @@ double Trap(double left_endpt, double right_endpt, int trap_count,
 /* Function we're integrating */
 double f(double x); 
 
-int main(int argc, char *argv[]) {
+int main(int argc, char *argv[]) {  //added argv and argc parameters
    int my_rank, comm_sz, n, local_n;   
    double a, b, h, local_a, local_b;
    double local_int, total_int = 0.0;
@@ -61,6 +64,7 @@ int main(int argc, char *argv[]) {
    /* Find out how many processes are being used */
    MPI_Comm_size(MPI_COMM_WORLD, &comm_sz);
 
+   //modified to include argc and argv parameters
    Get_input(my_rank, comm_sz, &a, &b, &n, argc, argv);
 
 
@@ -78,18 +82,18 @@ int main(int argc, char *argv[]) {
    // MPI_Reduce(&local_int, &total_int, 1, MPI_DOUBLE, MPI_SUM, 0,
    //       MPI_COMM_WORLD);
 
-   /* Print the result */
+   //for all proccesses other than 0, send their local int to process 0
    if (my_rank != 0) {
       MPI_Send(&local_int, 1, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD);
-   } else {
-      total_int = local_int;  // Start with process 0's own integral
-      for (source = 1; source < comm_sz; source++) {
+   } else { //for core process
+      total_int = local_int;  // process 0 adds its local int to total int
+      for (source = 1; source < comm_sz; source++) {  //receive local int from each process and add to total int
          double received_int;
          MPI_Recv(&received_int, 1, MPI_DOUBLE, source, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
          total_int += received_int;
       }
    }
-
+   /* Print the result */
    if (my_rank == 0) {
       printf("With n = %d trapezoids, our estimate\n", n);
       printf("of the integral from %f to %f = %.17f\n",
@@ -150,14 +154,16 @@ void Get_input(
       double*  a_p      /* out */, 
       double*  b_p      /* out */,
       int*     n_p      /* out */,
-      int argc, 
-      char *argv[]) {
+      int argc,         //added argc parameter for command line input
+      char *argv[]) {   //added argv parameter
+   //error handling for no or not enough command line arguments
    if (argc < 4) {
       if (my_rank == 0) {
          fprintf(stderr, "Usage: %s <a> <b> <n>\n", argv[0]);
       }
       MPI_Abort(MPI_COMM_WORLD, 1);
    }
+   //assigns command line arguments to a, b, and n variables and casts them to the correct type
    *a_p = atof(argv[1]);
    *b_p = atof(argv[2]);
    *n_p = atoi(argv[3]);
