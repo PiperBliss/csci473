@@ -285,7 +285,9 @@ def main():
     # Build sweep sets
     try:
         n_vals = inc_range(args.n1, args.n2, args.n_increment)
-        p_vals = inc_range(args.p1, args.p2, args.p_increment)
+        #hardcoded the p_vals to avoid long runtimes
+        #PREVIOUSLY: p_vals = inc_range(args.p1, args.p2, args.p_increment)
+        p_vals = [1, 2, 4, 8, 16, 32, 48, 64, 80, 96, 112, 128]
     except ValueError as e:
         print(f"[ERROR] {e}", file=sys.stderr)
         sys.exit(2)
