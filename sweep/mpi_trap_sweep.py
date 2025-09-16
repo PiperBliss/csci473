@@ -285,9 +285,17 @@ def main():
     # Build sweep sets
     try:
         n_vals = inc_range(args.n1, args.n2, args.n_increment)
-        #hardcoded the p_vals to avoid long runtimes
-        #PREVIOUSLY: p_vals = inc_range(args.p1, args.p2, args.p_increment)
-        p_vals = [1, 2, 4, 8, 16, 32, 48, 64, 80, 96, 112, 128]
+        
+        if args.p2 <= 12:
+            # Just do a standard sweep 1..p2 by 1
+            p_vals = list(range(args.p1, args.p2 + 1, 1))
+        elif args.p2 == 128:
+            # Special sequence: powers of 2 up to 32, then increments of 16
+            p_vals = [1, 2, 4, 8, 16, 32, 48, 64, 80, 96, 112, 128]
+        else:
+            # Fall back to user-specified increment
+            p_vals = inc_range(args.p1, args.p2, args.p_increment)
+
     except ValueError as e:
         print(f"[ERROR] {e}", file=sys.stderr)
         sys.exit(2)

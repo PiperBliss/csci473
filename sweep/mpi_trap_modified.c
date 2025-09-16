@@ -1,5 +1,6 @@
 /* mpi_trap4.c: Parallel trapezoidal rule with cmdline args and minimal timing output
  * Compile: mpicc -O2 -Wall -o mpi_trap_modified mpi_trap_modified.c
+            mpicc -Wall -Wextra -o mpi_trap_modified mpi_trap_modified.c
  * Run:     mpiexec -n <np> ./mpi_trap_modified <a> <b> <n>
  * Output (rank 0 only): "<answer> <a> <b> <n> <np> <total_time_seconds>"
  */
