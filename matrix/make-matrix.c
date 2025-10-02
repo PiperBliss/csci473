@@ -21,7 +21,8 @@
 #include <errno.h>
 #include <time.h>
 #include <limits.h>   /* INT_MAX */
-#include <unistd.h>   /* getopt(), optarg */
+#include <unistd.h>   /* optarg */
+#include <getopt.h> /* getopt() */
 
 static void
 print_usage_and_exit(const char *prog, int code)

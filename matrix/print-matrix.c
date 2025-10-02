@@ -19,11 +19,13 @@
  */
 
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
 #include <limits.h>   /* INT_MAX */
 #include <unistd.h>   /* getopt(), optarg */
+#include <getopt.h> /* getopt() */
 
 static void
 print_usage_and_exit(const char *prog, int code)

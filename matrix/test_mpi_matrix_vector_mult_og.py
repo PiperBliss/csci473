@@ -5,16 +5,20 @@ test_mpi_matrix_vector_mult.py
 Usage:
   python3 test_mpi_matrix_vector_mult.py starting_n ending_n n_increment starting_p ending_p p_increment
 
-This script:
- - For each n in [start..end] step n_increment:
-     * makes A: n x n, B: n x 1 once via ./make-matrix
-     * for each p in [p_start..p_end] step p_increment:
-         - runs: mpirun -np p ./mpi-matrix-vector-multiply A.bin B.bin C.bin
-         - parses: TIMING total_s=... read_s=... compute_s=... write_s=... m=... n=... p=... flops=... mflops_compute=... mflops_total=...
- - Writes CSV to ./mpi_results/mpi_results.csv (includes flops/mflops)
- - Produces the original 6 plots plus two MFLOPS plots:
-     * mflops_compute_vs_p.png
-     * mflops_total_vs_p.png
+What it does:
+  - For each n in [start..end] step n_increment:
+      * makes A: n x n, B: n x 1 once via ./make-matrix
+      * for each p in [p_start..p_end] step p_increment:
+          - runs: mpirun -np p ./mpi-matrix-vector-multiply A.bin B.bin C.bin
+          - parses: TIMING total_s=... read_s=... compute_s=... write_s=... m=... n=... p=...
+  - Writes CSV to ./mpi_results/mpi_results.csv
+  - Produces 6 combined plots (one curve per n):
+      * overall_times_vs_p.png
+      * overall_speedup_vs_p.png
+      * overall_efficiency_vs_p.png
+      * compute_times_vs_p.png
+      * compute_speedup_vs_p.png
+      * compute_efficiency_vs_p.png
 """
 
 import sys
@@ -32,17 +36,8 @@ MAKE_MATRIX = "./make-matrix"
 MPI_MATVEC  = "./mpi-matrix-vector-multiply"
 MPIRUN      = os.environ.get("MPIRUN", "mpirun")
 
-# TIMING regex: capture floats (allow exponent) and integers
-FLOAT_RE = r"[-+]?(?:\d+\.\d*|\d*\.\d+|\d+)(?:[eE][-+]?\d+)?"
-INT_RE = r"[-+]?\d+"
-
 TIMING_RE = re.compile(
-    rf"TIMING\s+total_s=(?P<total>{FLOAT_RE})\s+read_s=(?P<read>{FLOAT_RE})"
-    rf"\s+compute_s=(?P<compute>{FLOAT_RE})\s+write_s=(?P<write>{FLOAT_RE})"
-    rf"\s+m=(?P<m>{INT_RE})\s+n=(?P<n>{INT_RE})\s+p=(?P<p>{INT_RE})"
-    rf"\s+flops=(?P<flops>{INT_RE})"
-    rf"\s+mflops_compute=(?P<mflops_compute>{FLOAT_RE})"
-    rf"\s+mflops_total=(?P<mflops_total>{FLOAT_RE})"
+    r"TIMING\s+total_s=(?P<total>\d+\.\d+)\s+read_s=(?P<read>\d+\.\d+)\s+compute_s=(?P<compute>\d+\.\d+)\s+write_s=(?P<write>\d+\.\d+)\s+m=(?P<m>\d+)\s+n=(?P<n>\d+)\s+p=(?P<p>\d+)"
 )
 
 def die(msg):
@@ -57,6 +52,7 @@ def check_tools():
     for exe in (MAKE_MATRIX, MPI_MATVEC):
         if not (os.path.isfile(exe) and os.access(exe, os.X_OK)):
             die(f"Required executable not found or not executable: {exe}")
+    # Best-effort mpirun check
     _o, _e, rc = run_cmd([MPIRUN, "--version"])
     if rc != 0:
         print("WARNING: 'mpirun --version' failed; ensure MPI is available (set MPIRUN env if needed).", file=sys.stderr)
@@ -79,9 +75,6 @@ def parse_timing(text_out):
                 "m": int(d["m"]),
                 "n": int(d["n"]),
                 "p": int(d["p"]),
-                "flops": int(d["flops"]),
-                "mflops_compute": float(d["mflops_compute"]),
-                "mflops_total": float(d["mflops_total"]),
             }
     return None
 
@@ -106,8 +99,8 @@ def run_mpi_matvec(p, A_path, B_path, C_path):
 
 def per_n_series(rows, key_time):
     """
-    Build per-n series: {n: (ps_sorted, values_sorted)} using key_time.
-    rows: list of dicts with keys n, p, and numeric key_time
+    Build per-n series: {n: (ps_sorted, times_sorted)} using key_time ('total' or 'compute').
+    rows: list of dicts with keys n, p, total, read, compute, write
     """
     by_n = {}
     for r in rows:
@@ -136,6 +129,7 @@ def plot_multi_times(series_by_n, title, ylabel, outpath):
     plt.close()
 
 def build_speedup_efficiency(ps, ts, n, label_for_warning):
+    """Given vectors p, time, compute speedup & efficiency with per-n baseline."""
     if 1 in ps:
         base_idx = ps.index(1)
         base_p = 1
@@ -183,20 +177,6 @@ def plot_multi_efficiency(series_by_n, title, outpath, label_for_warning):
     plt.savefig(outpath, dpi=150)
     plt.close()
 
-def plot_multi_flops(series_by_n, title, ylabel, outpath):
-    plt.figure()
-    for n in sorted(series_by_n.keys()):
-        ps, fs = series_by_n[n]
-        plt.plot(ps, fs, marker="o", linewidth=2, label=f"n={n}")
-    plt.title(title)
-    plt.xlabel("Processes (p)")
-    plt.ylabel(ylabel)
-    plt.grid(True, linestyle="--", alpha=0.4)
-    plt.legend(title="Matrix size", ncol=2)
-    plt.tight_layout()
-    plt.savefig(outpath, dpi=150)
-    plt.close()
-
 # ---------- main ----------
 
 def main():
@@ -221,13 +201,20 @@ def main():
 
     ns = list(range(n_start, n_end + 1, n_step))
 
+    #added to fix the time issue on the debug node
+    #previously: ps = list(range(p_start, p_end + 1, p_step))
     if p_end == 128:
+        # For the special case of p_end=128, use a specific hardcoded list.
+        # Note: This overrides p_start and p_step for this case.
         ps = [1, 2, 4, 8, 16, 32, 48, 64, 80, 96, 112, 128]
     else:
+        # For all other cases, use the original behavior.
         ps = list(range(p_start, p_end + 1, p_step))
+
 
     print(f"Sweep: n in {ns}, p in {ps}")
 
+    # Gather all rows
     rows = []
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -250,30 +237,21 @@ def main():
                     "n": t["n"], "p": t["p"],
                     "total_s": t["total"], "read_s": t["read"],
                     "compute_s": t["compute"], "write_s": t["write"],
-                    "flops": t["flops"],
-                    "mflops_compute": t["mflops_compute"],
-                    "mflops_total": t["mflops_total"],
                 })
 
-    # Write CSV (include flops & mflops)
+    # Write CSV
     with open(csv_path, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=[
-            "n","p","total_s","read_s","compute_s","write_s",
-            "flops","mflops_compute","mflops_total"
-        ])
+        w = csv.DictWriter(f, fieldnames=["n","p","total_s","read_s","compute_s","write_s"])
         w.writeheader(); w.writerows(rows)
 
     # Build per-n series for overall and compute-only
+    # rows_for_plots: list of dicts with keys used by per_n_series
     rows_for_plots = [{"n": r["n"], "p": r["p"], "total": r["total_s"], "compute": r["compute_s"]} for r in rows]
     overall_series = per_n_series(rows_for_plots, key_time="total")
     compute_series = per_n_series(rows_for_plots, key_time="compute")
 
-    # Build series for MFLOPS
-    rows_for_flops = [{"n": r["n"], "p": r["p"], "mflops_compute": r["mflops_compute"], "mflops_total": r["mflops_total"]} for r in rows]
-    flops_compute_series = per_n_series(rows_for_flops, key_time="mflops_compute")
-    flops_total_series   = per_n_series(rows_for_flops, key_time="mflops_total")
-
-    # Produce original 6 combined plots
+    # Produce 6 combined plots (one curve per n per plot)
+    # Overall times / speedup / efficiency
     plot_multi_times(
         overall_series,
         title="Overall time vs processes (p) — one curve per n",
@@ -293,6 +271,7 @@ def main():
         label_for_warning="total",
     )
 
+    # Compute-only times / speedup / efficiency
     plot_multi_times(
         compute_series,
         title="Compute-only time vs processes (p) — one curve per n",
@@ -312,29 +291,15 @@ def main():
         label_for_warning="compute",
     )
 
-    # MFLOPS plots
-    plot_multi_flops(
-        flops_compute_series,
-        title="MFLOPS (compute phase) vs processes (p) — one curve per n",
-        ylabel="MFLOPS",
-        outpath=outdir / "mflops_compute_vs_p.png",
-    )
-    plot_multi_flops(
-        flops_total_series,
-        title="MFLOPS (overall) vs processes (p) — one curve per n",
-        ylabel="MFLOPS",
-        outpath=outdir / "mflops_total_vs_p.png",
-    )
-
     print("\nDone.")
     print(f"- Results CSV: {csv_path}")
     print(f"- Plots written to: {outdir}/")
     for fn in [
         "overall_times_vs_p.png", "overall_speedup_vs_p.png", "overall_efficiency_vs_p.png",
         "compute_times_vs_p.png", "compute_speedup_vs_p.png", "compute_efficiency_vs_p.png",
-        "mflops_compute_vs_p.png", "mflops_total_vs_p.png",
     ]:
         print(f"  - {fn}")
 
 if __name__ == "__main__":
     main()
+

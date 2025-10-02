@@ -18,6 +18,9 @@
 #include <limits.h>   /* INT_MAX */
 #include <stdint.h>
 #include <time.h>     /* clock_gettime */
+#include <sys/time.h>
+#include "papi.h"     /* profiler */
+
 
 typedef struct {
     size_t rows, cols;

@@ -1,13 +1,18 @@
 /*
- * mpi-matrix-vector-multiply.c
+ * mpi_matrix-vector-multiply.c
  *
  * Usage:
- *   mpirun -np <P> ./mpi-matrix-vector-multiply <input A> <input B> <output C>
+ *   mpirun -np <P> ./mpi_matrix-vector-multiply <input A> <input B> <output C>
  *
- * TIMING line (rank 0 prints):
- *   TIMING total_s=... read_s=... compute_s=... write_s=... m=... n=... p=... flops=... mflops_compute=... mflops_total=...
+ * Binary format (as in make-matrix):
+ *   [int rows][int cols][double payload row-major]
  *
- * Requires: link with -lpapi
+ * Timings (rank 0 prints):
+ *   TIMING total_s=... read_s=... compute_s=... write_s=... m=... n=... p=...
+ *     - read_s   : rank 0's time for reading A/B + Bcast(B) + Scatterv(A)
+ *     - compute_s: MAX over ranks of local compute time (critical path)
+ *     - write_s  : rank 0's time for Gatherv(C) + writing C
+ *     - total_s  : overall wall time on rank 0
  */
 
 #include <mpi.h>
@@ -19,14 +24,15 @@
 #include <stdint.h>
 #include "papi.h"     /* profiler */
 
+/* ---------------- one-malloc matrix container ---------------- */
 typedef struct {
     size_t rows, cols;
-    double **row;
-    double  *data;
-    void    *block;
+    double **row;   /* row pointers */
+    double  *data;  /* contiguous payload */
+    void    *block; /* base allocation to free */
 } Matrix;
 
-/* ---------------- helpers ---------------- */
+/* ---------------- helpers: usage & errors ---------------- */
 static void usage(const char *prog) {
     if (!prog) prog = "mpi_matrix-vector-multiply";
     fprintf(stderr,
@@ -35,7 +41,7 @@ static void usage(const char *prog) {
         prog);
 }
 
-/* overflow helpers */
+/* size_t overflow helpers */
 static int mul_size_t(size_t a, size_t b, size_t *out) {
 #if defined(__has_builtin)
 #  if __has_builtin(__builtin_mul_overflow)
@@ -58,6 +64,7 @@ static int add_size_t(size_t a, size_t b, size_t *out) {
     return 0;
 }
 
+/* Build one-malloc 2D layout (uninitialized payload) */
 static int alloc_matrix(size_t rows, size_t cols, Matrix *M) {
     memset(M, 0, sizeof(*M));
     size_t ptrs_bytes = 0, n_elems = 0, payload_bytes = 0, total_bytes = 0;
@@ -86,6 +93,7 @@ static int alloc_matrix(size_t rows, size_t cols, Matrix *M) {
     return 0;
 }
 
+/* Rank 0: read matrix from file into one-malloc layout */
 static int read_matrix_rank0(const char *path, Matrix *M) {
     memset(M, 0, sizeof(*M));
     FILE *fp = fopen(path, "rb");
@@ -128,6 +136,7 @@ static int read_matrix_rank0(const char *path, Matrix *M) {
     return 0;
 }
 
+/* Rank 0: write matrix to file from one-malloc layout */
 static int write_matrix_rank0(const char *path, const Matrix *M) {
     if (M->rows > (size_t)INT_MAX || M->cols > (size_t)INT_MAX) {
         fprintf(stderr, "Rank0: dims exceed INT_MAX for header: %zu x %zu\n", M->rows, M->cols);
@@ -160,7 +169,7 @@ static int write_matrix_rank0(const char *path, const Matrix *M) {
     return 0;
 }
 
-/* Partition rows */
+/* Row partitioning */
 static void partition_rows(int m, int world_size, int *counts_rows, int *displs_rows) {
     int base = m / world_size;
     int rem  = m % world_size;
@@ -181,6 +190,7 @@ int main(int argc, char **argv) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &world);
 
+    /* Graceful usage failure when args are missing */
     if (argc != 4) {
         if (rank == 0) usage(argv[0]);
         MPI_Finalize();
@@ -195,43 +205,17 @@ int main(int argc, char **argv) {
     Matrix B = {0};                    /* all ranks hold B (n x 1) */
     int m = 0, n = 0;
 
+    /* Timing variables */
     double t_total_start = 0.0, t_total_end = 0.0;
-    double t_read_start = 0.0, t_read_end = 0.0;
-    double t_compute_start = 0.0, t_compute_end = 0.0;
-    double t_write_start = 0.0, t_write_end = 0.0;
+    double t_read_start = 0.0, t_read_end = 0.0;       /* rank 0: read & distribute */
+    double t_compute_start = 0.0, t_compute_end = 0.0; /* each rank local; reduce max */
+    double t_write_start = 0.0, t_write_end = 0.0;     /* rank 0: gather+write */
     double compute_local = 0.0, compute_max = 0.0;
-
-    /* PAPI variables */
-    int papi_EventSet = PAPI_NULL;
-    long long papi_values[1] = {0};
-    int papi_err = PAPI_OK;
-    long long local_flops = 0;
-    long long total_flops = 0;
-
-    /* Initialize PAPI on all ranks; set local_flops to 0 if failure */
-    if ((papi_err = PAPI_library_init(PAPI_VER_CURRENT)) != PAPI_VER_CURRENT) {
-        if (rank == 0) {
-            fprintf(stderr, "Warning: PAPI_library_init failed or returned unexpected version (err=%d). PAPI disabled.\n", papi_err);
-        }
-        papi_err = PAPI_NOT_INIT;
-    } else {
-        if ((papi_err = PAPI_create_eventset(&papi_EventSet)) != PAPI_OK) {
-            fprintf(stderr, "Rank %d: PAPI_create_eventset failed: %s\n", rank, PAPI_strerror(papi_err));
-            papi_err = PAPI_NOT_INIT;
-        } else {
-            if ((papi_err = PAPI_add_event(papi_EventSet, PAPI_FP_OPS)) != PAPI_OK) {
-                fprintf(stderr, "Rank %d: PAPI_add_event(PAPI_FP_OPS) failed: %s\n", rank, PAPI_strerror(papi_err));
-                papi_err = PAPI_NOT_INIT;
-            } else {
-                /* papi initialized and event added */
-                papi_err = PAPI_OK;
-            }
-        }
-    }
 
     MPI_Barrier(MPI_COMM_WORLD);
     t_total_start = MPI_Wtime();
 
+    /* ---------------- Rank 0: Read & distribute ---------------- */
     MPI_Barrier(MPI_COMM_WORLD);
     if (rank == 0) t_read_start = MPI_Wtime();
 
@@ -249,7 +233,7 @@ int main(int argc, char **argv) {
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
         if (A_full.cols != B_full.rows) {
-            fprintf(stderr, "Rank0: Error: A(%zu x %zu) and B(%zu x %zu) mismatch\n",
+            fprintf(stderr, "Rank0: Error: A(%zu x %zu) and B(%zu x %zu) mismatch (need A.cols==B.rows)\n",
                     A_full.rows, A_full.cols, B_full.rows, B_full.cols);
             free(A_full.block); free(B_full.block);
             MPI_Abort(MPI_COMM_WORLD, 1);
@@ -263,6 +247,7 @@ int main(int argc, char **argv) {
         n = (int)A_full.cols;
     }
 
+    /* Broadcast dims to all ranks */
     if (MPI_Bcast(&m, 1, MPI_INT, 0, MPI_COMM_WORLD) != MPI_SUCCESS ||
         MPI_Bcast(&n, 1, MPI_INT, 0, MPI_COMM_WORLD) != MPI_SUCCESS) {
         if (rank == 0) fprintf(stderr, "MPI_Bcast of dims failed.\n");
@@ -277,6 +262,7 @@ int main(int argc, char **argv) {
         return EXIT_FAILURE;
     }
 
+    /* Allocate B on all ranks and broadcast its payload */
     if (alloc_matrix((size_t)n, 1, &B) != 0) {
         if (rank == 0) { free(A_full.block); free(B_full.block); }
         fprintf(stderr, "Rank %d: alloc_matrix for B(%d x 1) failed.\n", rank, n);
@@ -294,6 +280,7 @@ int main(int argc, char **argv) {
         return EXIT_FAILURE;
     }
 
+    /* Partition rows and build counts/displs (rows, and in doubles for A/C payloads) */
     int *counts_rows = (int*)malloc((size_t)world * sizeof(int));
     int *displs_rows = (int*)malloc((size_t)world * sizeof(int));
     if (!counts_rows || !displs_rows) {
@@ -333,6 +320,7 @@ int main(int argc, char **argv) {
         displs_A[r]     = (int)disp;
     }
 
+    /* Allocate local A (only as big as needed) and receive via Scatterv */
     int local_rows = counts_rows[rank];
     Matrix A_local = {0};
     if (alloc_matrix((size_t)local_rows, (size_t)n, &A_local) != 0) {
@@ -362,6 +350,7 @@ int main(int argc, char **argv) {
     }
 
     if (rank == 0) {
+        /* Free A_full now that rows are distributed */
         free(A_full.block);
         A_full.block = NULL;
         memset(&A_full, 0, sizeof(A_full));
@@ -370,6 +359,7 @@ int main(int argc, char **argv) {
     MPI_Barrier(MPI_COMM_WORLD);
     if (rank == 0) t_read_end = MPI_Wtime();
 
+    /* ---------------- Compute phase (each rank) ---------------- */
     Matrix C_local = {0};
     if (alloc_matrix((size_t)local_rows, 1, &C_local) != 0) {
         fprintf(stderr, "Rank %d: alloc_matrix C_local(%d x 1) failed.\n", rank, local_rows);
@@ -385,16 +375,6 @@ int main(int argc, char **argv) {
     MPI_Barrier(MPI_COMM_WORLD);
     t_compute_start = MPI_Wtime();
 
-    /* Start PAPI if initialized */
-    if (papi_err == PAPI_OK) {
-        if ((papi_err = PAPI_start(papi_EventSet)) != PAPI_OK) {
-            fprintf(stderr, "Rank %d: PAPI_start failed: %s\n", rank, PAPI_strerror(papi_err));
-            /* We'll continue but set papi_err to disabled so we don't stop/cleanup later */
-            papi_err = PAPI_NOT_INIT;
-        }
-    }
-
-    /* Compute local matrix-vector multiply */
     for (int i = 0; i < local_rows; ++i) {
         const double *Ai = A_local.row[i];
         double sum = 0.0;
@@ -404,21 +384,10 @@ int main(int argc, char **argv) {
         C_local.row[i][0] = sum;
     }
 
-    /* Stop PAPI and record local flops */
-    if (papi_err == PAPI_OK) {
-        if ((papi_err = PAPI_stop(papi_EventSet, papi_values)) != PAPI_OK) {
-            fprintf(stderr, "Rank %d: PAPI_stop failed: %s\n", rank, PAPI_strerror(papi_err));
-            local_flops = 0;
-        } else {
-            local_flops = papi_values[0];
-        }
-    } else {
-        local_flops = 0;
-    }
-
     t_compute_end = MPI_Wtime();
     compute_local = t_compute_end - t_compute_start;
 
+    /* Reduce compute to the max across ranks (critical path) */
     if (MPI_Reduce(&compute_local, &compute_max, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD) != MPI_SUCCESS) {
         fprintf(stderr, "Rank %d: MPI_Reduce for compute_max failed.\n", rank);
         if (rank == 0) { free(B_full.block); }
@@ -431,19 +400,7 @@ int main(int argc, char **argv) {
         return EXIT_FAILURE;
     }
 
-    /* Sum flops across ranks to rank 0 */
-    if (MPI_Reduce(&local_flops, &total_flops, 1, MPI_LONG_LONG, MPI_SUM, 0, MPI_COMM_WORLD) != MPI_SUCCESS) {
-        fprintf(stderr, "Rank %d: MPI_Reduce for total_flops failed.\n", rank);
-        if (rank == 0) { free(B_full.block); }
-        free(B.block);
-        free(C_local.block);
-        free(A_local.block);
-        free(counts_rows); free(displs_rows);
-        free(sendcounts_A); free(displs_A);
-        MPI_Finalize();
-        return EXIT_FAILURE;
-    }
-
+    /* ---------------- Gather+Write phase ---------------- */
     int *recvcounts_C = NULL;
     int *displs_C = NULL;
     double *C_recvbuf = NULL;
@@ -454,9 +411,13 @@ int main(int argc, char **argv) {
         displs_C     = (int*)malloc((size_t)world * sizeof(int));
         if (!recvcounts_C || !displs_C) {
             fprintf(stderr, "Rank0: malloc recvcounts/displs for C failed.\n");
-            free(B.block); free(C_local.block); free(A_local.block);
-            free(counts_rows); free(displs_rows); free(sendcounts_A); free(displs_A);
-            free(recvcounts_C); free(displs_C); free(B_full.block);
+            free(B.block);
+            free(C_local.block);
+            free(A_local.block);
+            free(counts_rows); free(displs_rows);
+            free(sendcounts_A); free(displs_A);
+            free(recvcounts_C); free(displs_C);
+            free(B_full.block);
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
         for (int r = 0; r < world; ++r) {
@@ -466,9 +427,13 @@ int main(int argc, char **argv) {
         C_recvbuf = (double*)malloc((size_t)m * sizeof(double));
         if (!C_recvbuf) {
             fprintf(stderr, "Rank0: malloc C_recvbuf(m=%d) failed.\n", m);
-            free(B.block); free(C_local.block); free(A_local.block);
-            free(counts_rows); free(displs_rows); free(sendcounts_A); free(displs_A);
-            free(recvcounts_C); free(displs_C); free(B_full.block);
+            free(B.block);
+            free(C_local.block);
+            free(A_local.block);
+            free(counts_rows); free(displs_rows);
+            free(sendcounts_A); free(displs_A);
+            free(recvcounts_C); free(displs_C);
+            free(B_full.block);
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
     }
@@ -477,29 +442,46 @@ int main(int argc, char **argv) {
                     C_recvbuf, recvcounts_C, displs_C, MPI_DOUBLE,
                     0, MPI_COMM_WORLD) != MPI_SUCCESS) {
         fprintf(stderr, "Rank %d: MPI_Gatherv of C failed.\n", rank);
-        if (rank == 0) { free(C_recvbuf); free(recvcounts_C); free(displs_C); }
-        free(B.block); free(C_local.block); free(A_local.block);
-        free(counts_rows); free(displs_rows); free(sendcounts_A); free(displs_A);
+        if (rank == 0) {
+            free(C_recvbuf);
+            free(recvcounts_C); free(displs_C);
+        }
+        free(B.block);
+        free(C_local.block);
+        free(A_local.block);
+        free(counts_rows); free(displs_rows);
+        free(sendcounts_A); free(displs_A);
         if (rank == 0) free(B_full.block);
-        MPI_Finalize(); return EXIT_FAILURE;
+        MPI_Finalize();
+        return EXIT_FAILURE;
     }
 
     if (rank == 0) {
+        /* Package full C and write to disk */
         Matrix C_full = {0};
         if (alloc_matrix((size_t)m, 1, &C_full) != 0) {
             fprintf(stderr, "Rank0: alloc_matrix C_full(%d x 1) failed.\n", m);
-            free(C_recvbuf); free(recvcounts_C); free(displs_C);
-            free(B.block); free(C_local.block); free(A_local.block);
-            free(counts_rows); free(displs_rows); free(sendcounts_A); free(displs_A);
+            free(C_recvbuf);
+            free(recvcounts_C); free(displs_C);
+            free(B.block);
+            free(C_local.block);
+            free(A_local.block);
+            free(counts_rows); free(displs_rows);
+            free(sendcounts_A); free(displs_A);
             free(B_full.block);
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
         memcpy(C_full.data, C_recvbuf, (size_t)m * sizeof(double));
         if (write_matrix_rank0(pathC, &C_full) != 0) {
             fprintf(stderr, "Rank0: write_matrix('%s') failed.\n", pathC);
-            free(C_full.block); free(C_recvbuf); free(recvcounts_C); free(displs_C);
-            free(B.block); free(C_local.block); free(A_local.block);
-            free(counts_rows); free(displs_rows); free(sendcounts_A); free(displs_A);
+            free(C_full.block);
+            free(C_recvbuf);
+            free(recvcounts_C); free(displs_C);
+            free(B.block);
+            free(C_local.block);
+            free(A_local.block);
+            free(counts_rows); free(displs_rows);
+            free(sendcounts_A); free(displs_A);
             free(B_full.block);
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
@@ -510,6 +492,7 @@ int main(int argc, char **argv) {
         t_write_end = MPI_Wtime();
     }
 
+    /* ---------------- Finalize timings & print (rank 0) ---------------- */
     MPI_Barrier(MPI_COMM_WORLD);
     t_total_end = MPI_Wtime();
 
@@ -519,16 +502,9 @@ int main(int argc, char **argv) {
         double write_s   = t_write_end  - t_write_start;
         double total_s   = t_total_end  - t_total_start;
 
-        double mflops_compute = 0.0;
-        double mflops_total   = 0.0;
-        if (compute_s > 0.0) mflops_compute = (double)total_flops / compute_s / 1e6;
-        if (total_s > 0.0)   mflops_total   = (double)total_flops / total_s / 1e6;
-
-        /* Machine-readable one-liner with flops/mflops */
-        printf("TIMING total_s=%.9f read_s=%.9f compute_s=%.9f write_s=%.9f "
-               "m=%d n=%d p=%d flops=%lld mflops_compute=%.3f mflops_total=%.3f\n",
-               total_s, read_s, compute_s, write_s, m, n, world,
-               total_flops, mflops_compute, mflops_total);
+        /* Machine-readable one-liner */
+        printf("TIMING total_s=%.9f read_s=%.9f compute_s=%.9f write_s=%.9f m=%d n=%d p=%d\n",
+               total_s, read_s, compute_s, write_s, m, n, world);
 
         /* Human-readable breakdown */
         fprintf(stdout,
@@ -537,17 +513,13 @@ int main(int argc, char **argv) {
                 "  read (I/O + dist): %.9f\n"
                 "  compute (max):     %.9f\n"
                 "  write (gather+I/O):%.9f\n"
-                "  total:             %.9f\n"
-                "Performance:\n"
-                "  flops (total sum across ranks): %lld\n"
-                "  compute (MFLOPS):  %.3f\n"
-                "  overall (MFLOPS):  %.3f\n",
+                "  total:             %.9f\n",
                 world, m, n, n, m,
-                read_s, compute_s, write_s, total_s,
-                total_flops, mflops_compute, mflops_total);
+                read_s, compute_s, write_s, total_s);
         fflush(stdout);
     }
 
+    /* ---------------- Cleanup ---------------- */
     if (rank == 0) {
         free(B_full.block);
     }
@@ -558,17 +530,7 @@ int main(int argc, char **argv) {
     free(counts_rows); free(displs_rows);
     free(sendcounts_A); free(displs_A);
 
-    /* PAPI cleanup if it was initialized */
-    if (papi_err == PAPI_OK) {
-        if ((papi_err = PAPI_cleanup_eventset(papi_EventSet)) != PAPI_OK) {
-            fprintf(stderr, "Rank %d: PAPI_cleanup_eventset failed: %s\n", rank, PAPI_strerror(papi_err));
-        }
-        if ((papi_err = PAPI_destroy_eventset(&papi_EventSet)) != PAPI_OK) {
-            fprintf(stderr, "Rank %d: PAPI_destroy_eventset failed: %s\n", rank, PAPI_strerror(papi_err));
-        }
-        PAPI_shutdown();
-    }
-
     MPI_Finalize();
     return EXIT_SUCCESS;
 }
+
