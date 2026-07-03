@@ -15,6 +15,7 @@ What it does:
       * writes per-n summary (mean/stdev) to ./results/summary_results.csv
   - Plots:
       * overall_time_vs_n.png, read_time_vs_n.png, compute_time_vs_n.png, write_time_vs_n.png
+      * performance_gflops_vs_n.png
       * combined_linear.png  (all four curves; linear Y; total has shaded ±1σ band)
       * combined_log.png     (all four curves; log Y; total has shaded ±1σ band)
   - Shows a live status bar with ETA that adapts using total ≈ a·n² + b.
@@ -34,9 +35,11 @@ from statistics import mean, pstdev
 import matplotlib.pyplot as plt
 import numpy as np
 
+# --- BEGIN MODIFICATION 1: Update Regex ---
 TIMING_RE = re.compile(
-    r"TIMING\s+total_s=(?P<total>\d+\.\d+)\s+read_s=(?P<read>\d+\.\d+)\s+compute_s=(?P<compute>\d+\.\d+)\s+write_s=(?P<write>\d+\.\d+)\s+m=(?P<m>\d+)\s+n=(?P<n>\d+)"
+    r"TIMING\s+total_s=(?P<total>\d+\.\d+)\s+read_s=(?P<read>\d+\.\d+)\s+compute_s=(?P<compute>\d+\.\d+)\s+write_s=(?P<write>\d+\.\d+)\s+m=(?P<m>\d+)\s+n=(?P<n_inside>\d+)\s+compute_flops_count=(?P<compute_flops_count>\d+\.\d+)"
 )
+# --- END MODIFICATION 1 ---
 
 MAKE_MATRIX = "./make-matrix"
 MATVEC = "./matrix-vector-multiply"
@@ -64,14 +67,17 @@ def parse_timing(s):
         m = TIMING_RE.search(line)
         if m:
             d = m.groupdict()
+            # --- BEGIN MODIFICATION 2: Parse new value ---
             return {
                 "total": float(d["total"]),
                 "read": float(d["read"]),
                 "compute": float(d["compute"]),
                 "write": float(d["write"]),
                 "m": int(d["m"]),
-                "n_inside": int(d["n"]),
+                "n_inside": int(d["n_inside"]),
+                "compute_flops_count": float(d["compute_flops_count"]),
             }
+            # --- END MODIFICATION 2 ---
     return None
 
 def ensure_results_dir():
@@ -152,6 +158,21 @@ def plot_series(xs, ys, title, ylabel, filename):
     plt.savefig(filename, dpi=150)
     plt.close()
 
+# --- BEGIN MODIFICATION 3: New plotting function for FLOPS ---
+def plot_flops(xs, total_gflops, compute_gflops, filename):
+    plt.figure()
+    plt.plot(xs, compute_gflops, marker="o", linewidth=2, label="Compute GFLOPS/s")
+    plt.plot(xs, total_gflops, marker="o", linewidth=2, label="Total GFLOPS/s")
+    plt.title("Performance vs matrix size (n)")
+    plt.xlabel("Matrix size n")
+    plt.ylabel("Performance (GigaFLOPS/s)")
+    plt.grid(True, linestyle="--", alpha=0.4)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(filename, dpi=150)
+    plt.close()
+# --- END MODIFICATION 3 ---
+
 def plot_combined(ns, total_mean, read_mean, compute_mean, write_mean,
                   total_std, filename, ylog=False):
     plt.figure()
@@ -202,13 +223,15 @@ def main():
     ns_all = list(range(n_start, n_end + 1, n_step))
 
     # For ETA:
-    measured_ns = []          # per-trial ns (for model)
+    measured_ns = []      # per-trial ns (for model)
     measured_totals = []      # per-trial totals (for model)
 
-    # CSV writers
-    trial_fields = ["n", "trial_index", "total_s", "read_s", "compute_s", "write_s"]
+    # --- BEGIN MODIFICATION 4: Update CSV headers ---
+    trial_fields = ["n", "trial_index", "total_s", "read_s", "compute_s", "write_s", "compute_flops_count"]
     summary_fields = ["n", "trials", "total_mean_s", "total_std_s",
-                      "read_mean_s", "compute_mean_s", "write_mean_s"]
+                      "read_mean_s", "compute_mean_s", "write_mean_s",
+                      "total_gflops_s", "compute_gflops_s"]
+    # --- END MODIFICATION 4 ---
 
     # Prepare containers for plots
     ns_summary = []
@@ -217,6 +240,11 @@ def main():
     read_means = []
     compute_means = []
     write_means = []
+    # --- BEGIN MODIFICATION 5: New containers for FLOPS data ---
+    total_gflops_list = []
+    compute_gflops_list = []
+    # --- END MODIFICATION 5 ---
+
 
     t0_wall = time.time()
 
@@ -252,6 +280,7 @@ def main():
             reads = []
             computes = []
             writes = []
+            flops_count_this_n = 0.0
 
             cumulative_total = 0.0
             trial_idx = 0
@@ -270,9 +299,11 @@ def main():
                 reads.append(t["read"])
                 computes.append(t["compute"])
                 writes.append(t["write"])
+                flops_count_this_n = t["compute_flops_count"] # Should be same for all trials of this n
                 cumulative_total += t["total"]
 
                 # log per-trial
+                # --- BEGIN MODIFICATION 6: Add flops count to trial CSV ---
                 trial_writer.writerow({
                     "n": n,
                     "trial_index": trial_idx,
@@ -280,7 +311,9 @@ def main():
                     "read_s": t["read"],
                     "compute_s": t["compute"],
                     "write_s": t["write"],
+                    "compute_flops_count": t["compute_flops_count"],
                 })
+                # --- END MODIFICATION 6 ---
 
                 # Update ETA model with this *trial*
                 measured_ns.append(n)
@@ -321,15 +354,31 @@ def main():
             compute_means.append(mean(computes))
             write_means.append(mean(writes))
 
+            # --- BEGIN MODIFICATION 7: Calculate and store GFLOPS/s ---
+            # Use the mean times to calculate the performance rates
+            total_mean_s = total_means[-1]
+            compute_mean_s = compute_means[-1]
+
+            # GigaFLOPS/s based on total program time
+            total_gflops = (flops_count_this_n / total_mean_s) / 1e9 if total_mean_s > 0 else 0.0
+            # GigaFLOPS/s based only on compute time
+            compute_gflops = (flops_count_this_n / compute_mean_s) / 1e9 if compute_mean_s > 0 else 0.0
+
+            total_gflops_list.append(total_gflops)
+            compute_gflops_list.append(compute_gflops)
+
             summary_writer.writerow({
                 "n": n,
                 "trials": trial_idx,
-                "total_mean_s": total_means[-1],
+                "total_mean_s": total_mean_s,
                 "total_std_s": total_stds[-1],
                 "read_mean_s": read_means[-1],
-                "compute_mean_s": compute_means[-1],
+                "compute_mean_s": compute_mean_s,
                 "write_mean_s": write_means[-1],
+                "total_gflops_s": total_gflops,
+                "compute_gflops_s": compute_gflops,
             })
+            # --- END MODIFICATION 7 ---
 
     # newline after status bar
     print()
@@ -337,12 +386,17 @@ def main():
     # Make the original single-curve plots (means)
     plot_series(ns_summary, total_means,  "Overall elapsed time vs matrix size (n)", "Time (seconds)",
                 results_dir / "overall_time_vs_n.png")
-    plot_series(ns_summary, read_means,   "Read time vs matrix size (n)",            "Time (seconds)",
+    plot_series(ns_summary, read_means,   "Read time vs matrix size (n)",           "Time (seconds)",
                 results_dir / "read_time_vs_n.png")
-    plot_series(ns_summary, compute_means,"Multiply time vs matrix size (n)",        "Time (seconds)",
+    plot_series(ns_summary, compute_means,"Multiply time vs matrix size (n)",       "Time (seconds)",
                 results_dir / "compute_time_vs_n.png")
-    plot_series(ns_summary, write_means,  "Write time vs matrix size (n)",           "Time (seconds)",
+    plot_series(ns_summary, write_means,  "Write time vs matrix size (n)",          "Time (seconds)",
                 results_dir / "write_time_vs_n.png")
+
+    # --- BEGIN MODIFICATION 8: Call the new FLOPS plotter ---
+    plot_flops(ns_summary, total_gflops_list, compute_gflops_list,
+               results_dir / "performance_gflops_vs_n.png")
+    # --- END MODIFICATION 8 ---
 
     # Combined plots with variance shading on Total
     plot_combined(ns_summary, total_means, read_means, compute_means, write_means,
@@ -355,17 +409,19 @@ def main():
     print(f"- Per-trial CSV: {trial_csv_path}")
     print(f"- Summary CSV:   {summary_csv_path}")
     print(f"- Plots saved in: {results_dir}/")
+    # --- BEGIN MODIFICATION 9: List new plot file ---
     for fn in [
         "overall_time_vs_n.png",
         "read_time_vs_n.png",
         "compute_time_vs_n.png",
         "write_time_vs_n.png",
+        "performance_gflops_vs_n.png",
         "combined_linear.png",
         "combined_log.png",
     ]:
         print(f"  - {fn}")
+    # --- END MODIFICATION 9 ---
     print(f"- Wall time: {elapsed:.3f}s")
 
 if __name__ == "__main__":
     main()
-

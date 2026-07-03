@@ -15,7 +15,7 @@ LDFLAGS     ?=
 LDLIBS      ?=
 # Note: If your platform needs -lrt for clock_gettime, do:
 #   make LDLIBS_EXTRA="-lrt"
-LDLIBS_EXTRA ?= -lpapi
+LDLIBS_EXTRA ?= 
 
 # --- Where to place binaries ---
 BIN_DIR ?= .

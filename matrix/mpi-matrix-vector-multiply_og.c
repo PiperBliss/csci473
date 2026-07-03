@@ -22,7 +22,6 @@
 #include <errno.h>
 #include <limits.h>
 #include <stdint.h>
-#include "papi.h"     /* profiler */
 
 /* ---------------- one-malloc matrix container ---------------- */
 typedef struct {

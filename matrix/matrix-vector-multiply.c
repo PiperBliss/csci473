@@ -2,13 +2,13 @@
  * matrix-vector-multiply.c
  *
  * Usage:
- *   ./matrix-vector-multiply <input matrix A> <input vector B> <output C>
+ * ./matrix-vector-multiply <input matrix A> <input vector B> <output C>
  *
  * File format (same as make-matrix): [int rows][int cols][double payload row-major]
  * Timing:
- *   - Prints machine-readable one-line summary:
- *       TIMING total_s=<..> read_s=<..> compute_s=<..> write_s=<..> m=<..> n=<..>
- *   - Also prints a human-readable breakdown.
+ * - Prints machine-readable one-line summary:
+ * TIMING total_s=<..> read_s=<..> compute_s=<..> write_s=<..> m=<..> n=<..> compute_flops_count=<..>
+ * - Also prints a human-readable breakdown.
  */
 
 #include <stdio.h>
@@ -19,7 +19,7 @@
 #include <stdint.h>
 #include <time.h>     /* clock_gettime */
 #include <sys/time.h>
-#include "papi.h"     /* profiler */
+
 
 
 typedef struct {
@@ -305,9 +305,17 @@ int main(int argc, char **argv) {
     /* Totals */
     const double total_s = now_sec() - t_start;
 
+    /* --- BEGIN MODIFICATION --- */
+    /* Calculate floating point operations for the compute step.
+     * For each of 'm' rows, we do 'n' multiplications and 'n' additions.
+     * Total FLOPS = m * 2n */
+    const double compute_flops_count = (double)m * (double)n * 2.0;
+
     /* Machine-readable one-liner for scripts */
-    printf("TIMING total_s=%.9f read_s=%.9f compute_s=%.9f write_s=%.9f m=%zu n=%zu\n",
-           total_s, read_s, compute_s, write_s, m, n);
+    printf("TIMING total_s=%.9f read_s=%.9f compute_s=%.9f write_s=%.9f m=%zu n=%zu compute_flops_count=%.1f\n",
+           total_s, read_s, compute_s, write_s, m, n, compute_flops_count);
+    /* --- END MODIFICATION --- */
+
 
     /* Human-readable breakdown */
     fprintf(stdout,
@@ -325,4 +333,3 @@ int main(int argc, char **argv) {
     free(C.block);
     return EXIT_SUCCESS;
 }
-
